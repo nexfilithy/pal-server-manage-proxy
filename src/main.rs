@@ -73,12 +73,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             // let mut dropped = Vec::new();
                                             let timeout = env::var("CONNECTION_TIMEOUT").expect("msg").parse().unwrap();
 
-                                            for (addr, (timestamp, _socket)) in sockets_clone.clone().into_iter() {
+                                            for (src, (timestamp, _socket)) in sockets_clone.clone().into_iter() {
                                                 log::debug!("now is {now} and timestamp is {:?}", timestamp);
                             
                                                 if (now - timestamp.load(Ordering::SeqCst)) > timeout {
                             
-                                                    sockets_clone.remove(&addr);
+                                                    sockets_clone.remove(&src);
                                                     counter_clone.fetch_sub(1, Ordering::SeqCst);
                                                     log::info!("Connection from {addr} inactive for too long dropping..");
                                                     // dropped.push(addr)
