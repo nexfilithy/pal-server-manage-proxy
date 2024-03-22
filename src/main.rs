@@ -17,7 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("listening on: {}", listen_addr);
 
     let mut sockets: FxHashMap<SocketAddr, (Arc<AtomicU64>, Arc<UdpSocket>)> = FxHashMap::default();
-    let mut buf: [u8; 65535] = [0; 65535];
+    let mut buf: [u8; 65536] = [0; 65536];
     let counter = Arc::new(AtomicU64::new(0));
     let mut gameserver_process = Option::None;
     let server_update_hour = env::var("SERVER_UPDATE_HOUR").unwrap_or_default().parse().unwrap_or_default();
@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let parent = listener.clone();
 
                             tokio::spawn(async move {
-                                let mut buf = vec![0; 65535];
+                                let mut buf = vec![0; 65536];
 
                                 loop {
                                     let nbytes = socket.recv(&mut buf).await.unwrap();
