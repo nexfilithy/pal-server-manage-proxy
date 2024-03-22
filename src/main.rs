@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         },
                                         _ = timeout_ => {
                                             let now = start.elapsed().as_millis() as u64;
-                                            let mut dropped = Vec::new();
+                                            // let mut dropped = Vec::new();
                                             let timeout = env::var("CONNECTION_TIMEOUT").expect("msg").parse().unwrap();
 
                                             for (addr, (timestamp, _socket)) in sockets_clone.clone().into_iter() {
@@ -78,16 +78,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             
                                                 if (now - timestamp.load(Ordering::SeqCst)) > timeout {
                             
-                                                    dropped.push(addr)
+                                                    sockets_clone.remove(&addr);
+                                                    counter_clone.fetch_sub(1, Ordering::SeqCst);
+                                                    log::info!("Connection from {addr} inactive for too long dropping..");
+                                                    // dropped.push(addr)
                                                 }
                                             }
                             
-                                            for sock_addr in dropped {
-                                                log::info!("Connection from {sock_addr} inactive for too long dropping..");
-                                                sockets_clone.remove(&sock_addr);
+                                            // for sock_addr in dropped {
                             
-                                                counter_clone.fetch_sub(1, Ordering::SeqCst);
-                                            }
+                                            // }
                                         }
                                     }
                                     // let nbytes = socket.recv(&mut buf).await.unwrap();
