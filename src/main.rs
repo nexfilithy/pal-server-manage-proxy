@@ -40,6 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Ok(_) => {
                                     timeout.store(start.elapsed().as_millis() as u64, Ordering::SeqCst);
                                     servertimeout = start.elapsed().as_millis() as u64;
+
                                 },
                                 Err(e) => log::warn!("socket send failed with {e}")
                             }
@@ -57,43 +58,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 };
                             }
                             let parent = listener.clone();
-                            let mut sockets_clone = sockets.clone();
-                            let counter_clone = counter.clone();
+
                             tokio::spawn(async move {
                                 let mut buf = vec![0; 65535];
 
                                 loop {
-                                    let timeout_ = sleep(Duration::from_millis(15000));
-                                    tokio::select! {
-                                        nbytes = socket.recv(&mut buf) => {
-                                            parent.send_to(&buf[..nbytes.unwrap()], &addr).await.unwrap();
-                                        },
-                                        _ = timeout_ => {
-                                            let now = start.elapsed().as_millis() as u64;
-                                            // let mut dropped = Vec::new();
-                                            let timeout = env::var("CONNECTION_TIMEOUT").expect("msg").parse().unwrap();
-
-                                            for (src, (timestamp, _socket)) in sockets_clone.clone().into_iter() {
-                                                log::debug!("now is {now} and timestamp is {:?}", timestamp);
-                            
-                                                if (now - timestamp.load(Ordering::SeqCst)) > timeout {
-                            
-                                                    sockets_clone.remove(&src);
-                                                    counter_clone.fetch_sub(1, Ordering::SeqCst);
-                                                    log::info!("Connection from {addr} inactive for too long dropping..");
-                                                    // dropped.push(addr)
-                                                }
-                                            }
-                            
-                                            // for sock_addr in dropped {
-                            
-                                            // }
-                                        }
-                                    }
-                                    // let nbytes = socket.recv(&mut buf).await.unwrap();
-                                    // log::trace!("jotain received {nbytes}");
-                                    // parent.send_to(&buf[..nbytes], &addr).await.unwrap();
-                                    // log::trace!("jotain send to {addr}");
+                                    let nbytes = socket.recv(&mut buf).await.unwrap();
+                                    log::trace!("jotain received {nbytes}");
+                                    parent.send_to(&buf[..nbytes], &addr).await.unwrap();
+                                    log::trace!("jotain send to {addr}");
                                 }
                             });  
                         }
@@ -105,7 +78,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             _ = timeout => {
                 let now = start.elapsed().as_millis() as u64;
+                let mut dropped = Vec::new();
+                let timeout = env::var("CONNECTION_TIMEOUT").expect("msg").parse().unwrap();
                 let servertimeoutvar = env::var("SERVER_TIMEOUT").unwrap_or_else(|_| "300000".to_owned()).parse::<u64>().unwrap();
+
+                for (addr, (timestamp, _socket)) in sockets.clone().into_iter() {
+                    log::debug!("now is {now} and timestamp is {:?}", timestamp);
+
+                    if (now - timestamp.load(Ordering::SeqCst)) > timeout {
+
+                        dropped.push(addr)
+                    }
+                }
+
+                for sock_addr in dropped {
+                    log::info!("Connection from {sock_addr} inactive for too long dropping..");
+                    sockets.remove(&sock_addr);
+
+                    counter.fetch_sub(1, Ordering::SeqCst);
+                }
                 if counter.load(Ordering::SeqCst) == 0 && now - servertimeout > servertimeoutvar {
                     match gameserver_process.take() {
                         Some(child) => {
@@ -142,7 +133,7 @@ fn run_game_server() -> io::Result<Child> {
 
 fn stop_game_server(mut child: Child) {
     log::info!("Stopping game server...");
-  
+
     match child.kill() {
         Ok(_) => {
             let _ = child.wait();
@@ -255,4 +246,4 @@ fn get_debug_level(args:String) -> LevelFilter {
         "trace" => {println!("using log levle Trace");LevelFilter::Trace},
         _ => {println!("log level was incorectly supplied using default = info"); LevelFilter::Info}
     }
-}
+} 
