@@ -1,128 +1,206 @@
-use std::{env, fs, io, net::SocketAddr, path::{Path, PathBuf}, process::{Child, Command, Stdio}, sync::{atomic::{AtomicU64, Ordering}, Arc}, time::{Duration,Instant}};
+use std::{env, fs, io, net::SocketAddr, path::{Path, PathBuf}, process::{Child, Command, Stdio}, sync::{atomic::{AtomicU64, Ordering}, Arc, Mutex}, time::{Duration,Instant}};
 use chrono::{Local, Timelike, Days};
 use dotenv::dotenv;
 use log::LevelFilter;
-use tokio::{net::UdpSocket, time::sleep};
+use tokio::{net::UdpSocket, sync::mpsc, task::JoinHandle, time::sleep};
 use fxhash::FxHashMap;
 use simple_logger::SimpleLogger;
 use walkdir::WalkDir;
+use simple_eyre::eyre::{eyre, Result, WrapErr};
+
+#[derive(Debug)]
+struct UdpProxyConn {
+    pub sock: UdpSocket,
+    pub last_activity: AtomicU64,
+}
+
+impl UdpProxyConn {
+    fn new(sock: UdpSocket) -> Self {
+        Self {
+            sock,
+            last_activity: AtomicU64::new(0),
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
     let start = Instant::now();
-    SimpleLogger::new().with_level(get_debug_level(env::var("LOG_LEVEL").unwrap_or_else(|_| {println!("log level was incorectly supplied using default = info");"info".to_string()}))).with_local_timestamps().init().unwrap();
+    SimpleLogger::new().with_level(get_debug_level(env::var("LOG_LEVEL").unwrap_or_else(|_| {println!("log level was incorectly supplied using default = info");"info".to_string()}))).init().unwrap();
     let listen_addr = env::var("LISTEN_ADDR").unwrap_or_else(|_| {log::warn!("listen address was not supplied using default palworld port +1"); "0.0.0.0:8212".to_string()});
     let listener = Arc::new(UdpSocket::bind(&listen_addr).await?);
     log::info!("listening on: {}", listen_addr);
 
-    let mut sockets: FxHashMap<SocketAddr, (Arc<AtomicU64>, Arc<UdpSocket>)> = FxHashMap::default();
+    let mut sockets: FxHashMap<SocketAddr, (Arc<UdpProxyConn>, JoinHandle<()>)> = FxHashMap::default();
     let mut buf: [u8; 65536] = [0; 65536];
     let counter = Arc::new(AtomicU64::new(0));
     let mut gameserver_process = Option::None;
     let server_update_hour = env::var("SERVER_UPDATE_HOUR").unwrap_or_default().parse().unwrap_or_default();
     let mut updatetime = update_time(server_update_hour);
     let mut servertimeout = start.elapsed().as_millis() as u64;
+    let (tx, mut rx) = mpsc::channel::<SocketAddr>(128);
+    let servertimeoutvar = env::var("SERVER_TIMEOUT").unwrap_or_else(|_| "300000".to_owned()).parse::<u64>().unwrap();
 
+   loop {
+    let timeout = sleep(Duration::from_millis(15000));
+    let update = sleep(updatetime);
+    tokio::select! {
 
-
-    loop {
-        let timeout = sleep(Duration::from_millis(15000));
-        let update = sleep(updatetime);
-
-        tokio::select! {
-            res = listener.recv_from(&mut buf) => {
-                log::debug!("packet received");
-                match res {
-                    Ok((len, addr)) => {
-                        if let Some((timeout, socket)) = sockets.get(&addr) {
-                            match socket.send_to(&buf[..len], env::var("SERVER_ADDR").unwrap_or_else(|_| {log::warn!("server adress not supplied using default palworld port on localhost"); "127.0.0.1:8211".to_string()})).await {
-                                Ok(_) => {
-                                    timeout.store(start.elapsed().as_millis() as u64, Ordering::SeqCst);
-                                    servertimeout = start.elapsed().as_millis() as u64;
-
-                                },
-                                Err(e) => log::warn!("socket send failed with {e}")
-                            }
-                        } else {
-                            counter.fetch_add(1, Ordering::SeqCst);
-                            let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
-                            sockets.insert(addr, (Arc::new(AtomicU64::new(start.elapsed().as_millis() as u64)), socket.clone()));
-                            log::info!("new connection from {addr}");
-                            if !gameserver_process.is_some() {
-                                match run_game_server() {
-                                    Ok(child) => {gameserver_process = Some(child).into();
-                                        log::info!("game server up and running")
-                                    },
-                                    Err(e) => log::warn!("starting game server failed with {e}")
-                                };
-                            }
-                            let parent = listener.clone();
-
-                            tokio::spawn(async move {
-                                let mut buf = vec![0; 65536];
-
-                                loop {
-                                    let nbytes = socket.recv(&mut buf).await.unwrap();
-                                    log::trace!("jotain received {nbytes}");
-                                    parent.send_to(&buf[..nbytes], &addr).await.unwrap();
-                                    log::trace!("jotain send to {addr}");
-                                }
-                            });  
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!("couldn't do something {e}")
-                    }
+        addr = rx.recv() => {
+            if let Some(addr) = addr {
+                if let Some((_conn, handle)) = sockets.remove(&addr) {
+                    log::info!("closing {addr} due to inactivity");
+                    handle.abort();
+                    servertimeout = start.elapsed().as_millis() as u64;
+                    updatetime = update_time(server_update_hour);
                 }
-            },
-            _ = timeout => {
-                let now = start.elapsed().as_millis() as u64;
-                let mut dropped = Vec::new();
-                let timeout = env::var("CONNECTION_TIMEOUT").expect("msg").parse().unwrap();
-                let servertimeoutvar = env::var("SERVER_TIMEOUT").unwrap_or_else(|_| "300000".to_owned()).parse::<u64>().unwrap();
-
-                for (addr, (timestamp, _socket)) in sockets.clone().into_iter() {
-                    log::debug!("now is {now} and timestamp is {:?}", timestamp);
-
-                    if (now - timestamp.load(Ordering::SeqCst)) > timeout {
-
-                        dropped.push(addr)
-                    }
-                }
-
-                for sock_addr in dropped {
-                    log::info!("Connection from {sock_addr} inactive for too long dropping..");
-                    sockets.remove(&sock_addr);
-
-                    counter.fetch_sub(1, Ordering::SeqCst);
-                }
-                if counter.load(Ordering::SeqCst) == 0 && now - servertimeout > servertimeoutvar {
-                    match gameserver_process.take() {
-                        Some(child) => {
-                            stop_game_server(child);
-                            match backup_save() {
-                                Ok(_) => log::info!("back up ok"),
-                                Err(e) => log::warn!("back up not ok {e}")
-                            }
-                        },
-                        None => {updatetime = update_time(server_update_hour)}
-                    }
             }
-            }
-            _ = update => {
-                if counter.load(Ordering::SeqCst) == 0 {
-                    log::info!("starting to update server");
-                    update_server();
-                    log::info!("finished to update server");
-                    updatetime = update_time(server_update_hour)
+
+        }
+        ret = listener.recv_from(&mut buf) => {
+            let (read, addr) = ret.wrap_err("failed to accept connection")?;
+            if !gameserver_process.is_some() {
+                match run_game_server().await{
+                    Ok(child) => gameserver_process = Some(child).into(),
+                    Err(e) => log::warn!("starting game server failed with {e}")
                 };
             }
+
+
+            if let Err(why) = handle_connection(
+                listener.clone(),
+                addr,
+                &mut buf[..read],
+                &mut sockets,
+                tx.clone(),
+            )
+            .await
+            {
+                log::error!("{why:#}");
+            }
+        }
+        _ = timeout => {
+            let timenow = start.elapsed().as_millis() as u64;
+            if sockets.is_empty() && timenow - servertimeout > servertimeoutvar {
+                match gameserver_process.take() {
+                    Some(child) => {
+                        stop_game_server(child);
+                        match backup_save() {
+                            Ok(_) => log::info!("back up ok"),
+                            Err(e) => log::warn!("back up not ok {e}")
+                        }
+                    },
+                    None => {updatetime = update_time(server_update_hour)}
+                }
+        }
+        }
+        _ = update => {
+            if sockets.is_empty() && gameserver_process.is_none() {
+                log::info!("starting to update server");
+                update_server();
+                log::info!("finished to update server");
+                updatetime = update_time(server_update_hour)
+            };
         }
     }
-} 
+   }
+}
+    
+async fn handle_connection(
+    src: Arc<UdpSocket>,
+    addr: SocketAddr,
+    buffer: &mut [u8],
+    sockets: &mut FxHashMap<SocketAddr, (Arc<UdpProxyConn>, JoinHandle<()>)>,
+    tx: mpsc::Sender<SocketAddr>,
+) -> Result<()> {
 
-fn run_game_server() -> io::Result<Child> {
+    
+    let src_addr = src.local_addr().unwrap();
+    let socket = match sockets.get(&addr) {
+        Some((socket, _handle)) => {
+            socket.last_activity.fetch_add(1, Ordering::SeqCst);
+            socket.clone()
+        }
+
+        None => {
+            log::info!("[new conn] [origin: {addr}] [src: {src_addr}]");
+
+
+            let socket = {
+                let sock = UdpSocket::bind("0.0.0.0:0").await?;
+                Arc::new(UdpProxyConn::new(sock))
+            };
+            let close_after = Duration::from_millis(env::var("CONNECTION_TIMEOUT").unwrap().parse::<u64>().unwrap_or_default());
+            let src_clone = src.clone();
+            let socket_clone = socket.clone();
+            let handle = tokio::spawn(async move {
+                if let Err(why) = traffic(addr, src_addr, src_clone, socket_clone).await {
+                    log::error!("{why:#}");
+                };
+            });
+            tokio::spawn(close_after_inactivity(
+                addr,
+                close_after,
+                tx.clone(),
+                socket.clone(),
+            ));
+
+            sockets.insert(addr, (socket.clone(), handle));
+            socket
+        }
+    };
+
+    match socket.sock.send_to(buffer, env::var("SERVER_ADDR").unwrap_or_else(|_| {log::warn!("server adress not supplied using default palworld port on localhost"); "127.0.0.1:8211".to_string()})).await {
+        Ok(size) => {
+            log::trace!("from [{}] to [{}], size: {}", src_addr, addr, size);
+            Ok(())
+        }
+        Err(err) => Err(err).wrap_err("failed to write data to the upstream connection"),
+    }
+}
+
+async fn traffic(
+    addr: SocketAddr,
+    src_addr: SocketAddr,
+    src: Arc<UdpSocket>,
+    socket: Arc<UdpProxyConn>,
+) -> Result<()> {
+    let mut buffer = [0u8; 65536];
+
+    loop {
+        let read_bytes = socket.sock.recv(&mut buffer).await?;
+        let sent_bytes = src.send_to(&buffer[..read_bytes], addr).await?;
+        if sent_bytes == 0 {
+            return Err(eyre!("couldn't sent anything to downstream"));
+        }
+        log::trace!("from [{}] to [{}], size: {}", addr, src_addr, sent_bytes);
+
+        socket.last_activity.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+async fn close_after_inactivity(
+    addr: SocketAddr,
+    close_after: Duration,
+    tx: mpsc::Sender<SocketAddr>,
+    socket: Arc<UdpProxyConn>,
+) {
+    let mut last_activity = socket.last_activity.load(Ordering::SeqCst);
+    loop {
+        tokio::time::sleep(close_after).await;
+        if socket.last_activity.load(Ordering::SeqCst) == last_activity {
+            break;
+        }
+        last_activity = socket.last_activity.load(Ordering::SeqCst);
+    }
+
+    if let Err(why) = tx.send(addr).await {
+        log::error!("couldn't send the close command to conn channel: {why}");
+    }
+}
+
+async fn run_game_server() -> io::Result<Child> {
     log::info!("Starting game server...");
     let path_binary = env::var("PATH_SERVER_BINARY").expect("Server binary path is missing");
     Command::new(path_binary)
