@@ -90,7 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Err(e) => log::warn!("back up not ok {e}")
                         }
                     },
-                    None => {updatetime = update_time(server_update_hour); log::debug!("current duration for update is {:?} s", updatetime)}
+                    None => {updatetime = update_time(server_update_hour)}
                 }
         }
         }
