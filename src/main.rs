@@ -1,4 +1,4 @@
-use std::{env, fs, io, net::SocketAddr, path::{Path, PathBuf}, process::{Child, Command, Stdio}, sync::{atomic::{AtomicU64, Ordering}, Arc, Mutex}, time::{Duration,Instant}};
+use std::{env, fs, io, net::SocketAddr, path::{Path, PathBuf}, process::{Child, Command, Stdio}, sync::{atomic::{AtomicU64, Ordering}, Arc}, time::{Duration,Instant}};
 use chrono::{Local, Timelike, Days};
 use dotenv::dotenv;
 use log::LevelFilter;
@@ -34,7 +34,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut sockets: FxHashMap<SocketAddr, (Arc<UdpProxyConn>, JoinHandle<()>)> = FxHashMap::default();
     let mut buf: [u8; 65536] = [0; 65536];
-    let counter = Arc::new(AtomicU64::new(0));
     let mut gameserver_process = Option::None;
     let server_update_hour = env::var("SERVER_UPDATE_HOUR").unwrap_or_default().parse().unwrap_or_default();
     let mut updatetime = update_time(server_update_hour);
