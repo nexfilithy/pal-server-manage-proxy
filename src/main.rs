@@ -233,10 +233,9 @@ fn backup_save() -> std::io::Result<()> {
         .filter(|e| e.file_type().is_file())
     {
         let path = entry.path();
-        if is_specific_file(&path) {
+        if is_specific_file(&path, "sav") {
             let relative_path = path.strip_prefix(parent_dir).unwrap();
             let file_stem = relative_path.file_stem().unwrap().to_str().unwrap();
-            let extension = relative_path.extension().unwrap().to_str().unwrap();
 
             // Generate a timestamp for the backup file
             let timestamp = chrono::Local::now().format("%Y%m%dT%H%M%S").to_string();
@@ -251,38 +250,55 @@ fn backup_save() -> std::io::Result<()> {
             log::info!("File backed up to {:?}", destination_path);
 
             // Clean up older versions, keeping the last 5
-            clean_up_old_versions(backup_dir, file_stem, extension, 5)?;
+            clean_up_old_versions(backup_dir, "bak", 5)?;
         }
     }
     Ok(())
 }
 
 // Placeholder function to determine if a file meets your specific criteria
-fn is_specific_file(path: &Path) -> bool {
+fn is_specific_file(path: &Path, ext:&str) -> bool {
     // Example condition: file extension is "txt"
-    path.extension().and_then(|ext| ext.to_str()) == Some("sav")
+    path.extension().and_then(|ext| ext.to_str()) == Some(ext)
     // Add more conditions as needed
 }
 
-fn clean_up_old_versions(parent: &Path, stem: &str, ext: &str, keep_last: usize) -> std::io::Result<()> {
-    let backups_dir = parent;
-    let pattern = format!("{}_*.bak", stem);
+fn clean_up_old_versions(parent: &Path, ext: &str, keep_last: usize) -> std::io::Result<()> {
+     let backups_dir = parent;
 
-    let mut backups: Vec<PathBuf> = WalkDir::new(backups_dir)
+    // Group backups by base file name
+    let mut grouped_backups: std::collections::HashMap<String, Vec<PathBuf>> = std::collections::HashMap::new();
+
+    for entry in WalkDir::new(backups_dir)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_str().map_or(false, |s| s.starts_with(&pattern) && s.ends_with(ext)))
-        .map(|e| e.into_path())
-        .collect();
-
-    // Sort backups by their modified time or filename in descending order
-    backups.sort_by(|a, b| b.cmp(a));
-
-    // Keep the last 5 versions, remove the rest
-    for old_backup in backups.iter().skip(keep_last) {
-        fs::remove_file(old_backup)?;
-        log::info!("Removed old backup: {:?}", old_backup);
+        .filter(|e| e.path().extension().and_then(|ext| ext.to_str()) == Some(ext))
+    {
+        if let Some(_file_name) = entry.file_name().to_str() {
+            if let Some(stem) = entry.path().file_stem().and_then(|s| s.to_str()) {
+                // Remove the timestamp and extension to group by the original file name
+                let parts: Vec<&str> = stem.rsplitn(2, '_').collect();
+                if parts.len() == 2 {
+                    let base_name = parts[1]; // Original file name before the timestamp
+                    grouped_backups.entry(base_name.to_string())
+                        .or_insert_with(Vec::new)
+                        .push(entry.into_path());
+                }
+            }
+        }
     }
+
+    // For each group, keep the last `keep_last` versions, remove the rest
+    for (_base_name, mut backups) in grouped_backups {
+        // Sort backups by their modified time or filename in descending order
+        backups.sort_by(|a, b| b.cmp(a));
+
+        for old_backup in backups.iter().skip(keep_last) {
+            fs::remove_file(old_backup)?;
+            log::info!("Removed old backup: {:?}", old_backup);
+        }
+    }
+
     Ok(())
 }
 
