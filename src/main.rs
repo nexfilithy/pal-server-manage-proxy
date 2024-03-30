@@ -28,6 +28,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
     let start = Instant::now();
     SimpleLogger::new().with_level(get_debug_level(env::var("LOG_LEVEL").unwrap_or_else(|_| {println!("log level was incorectly supplied using default = info");"info".to_string()}))).init().unwrap();
+    log::info!("First update the server");
+    update_server();
+    log::info!("server was updated");
     let listen_addr = env::var("LISTEN_ADDR").unwrap_or_else(|_| {log::warn!("listen address was not supplied using default palworld port +1"); "0.0.0.0:8212".to_string()});
     let listener = Arc::new(UdpSocket::bind(&listen_addr).await?);
     log::info!("listening on: {}", listen_addr);
